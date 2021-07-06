@@ -53,93 +53,64 @@ def discover_delete_images(regionname):
     print("Discovering images in " + regionname)
     ecr_client = boto3.client('ecr', region_name=regionname)
 
-    repositories = []
+    repositories = []    
+    branches = ['master','develop'] # list of branches we have created images for
+
     describe_repo_paginator = ecr_client.get_paginator('describe_repositories')
     for response_listrepopaginator in describe_repo_paginator.paginate():
         for repo in response_listrepopaginator['repositories']:
-            repositories.append(repo)
-
-    ecs_client = boto3.client('ecs', region_name=regionname)
-
-    listclusters_paginator = ecs_client.get_paginator('list_clusters')
-    running_containers = []
-    for response_listclusterpaginator in listclusters_paginator.paginate():
-        for cluster in response_listclusterpaginator['clusterArns']:
-            listtasks_paginator = ecs_client.get_paginator('list_tasks')
-            for reponse_listtaskpaginator in listtasks_paginator.paginate(cluster=cluster, desiredStatus='RUNNING'):
-                if reponse_listtaskpaginator['taskArns']:
-                    describe_tasks_list = ecs_client.describe_tasks(
-                        cluster=cluster,
-                        tasks=reponse_listtaskpaginator['taskArns']
-                    )
-
-                    for tasks_list in describe_tasks_list['tasks']:
-                        if tasks_list['taskDefinitionArn'] is not None:
-                            response = ecs_client.describe_task_definition(
-                                taskDefinition=tasks_list['taskDefinitionArn']
-                            )
-                            for container in response['taskDefinition']['containerDefinitions']:
-                                if '.dkr.ecr.' in container['image'] and ":" in container['image']:
-                                    if container['image'] not in running_containers:
-                                        running_containers.append(container['image'])
-
-    print("Images that are running:")
-    for image in running_containers:
-        print(image)
+            repositories.append(repo) 
 
     for repository in repositories:
         print("------------------------")
         print("Starting with repository :" + repository['repositoryUri'])
         deletesha = []
         deletetag = []
-        tagged_images = []
+        
+        for branch in branches:
+            tagged_images = [] # list of images in branch
 
-        describeimage_paginator = ecr_client.get_paginator('describe_images')
-        for response_describeimagepaginator in describeimage_paginator.paginate(
-                registryId=repository['registryId'],
-                repositoryName=repository['repositoryName']):
-            for image in response_describeimagepaginator['imageDetails']:
-                if 'imageTags' in image:
-                    tagged_images.append(image)
-                else:
-                    append_to_list(deletesha, image['imageDigest'])
+            describeimage_paginator = ecr_client.get_paginator('describe_images')
+            for response_describeimagepaginator in describeimage_paginator.paginate(
+                    registryId=repository['registryId'],
+                    repositoryName=repository['repositoryName']):
+                for image in response_describeimagepaginator['imageDetails']:
+                    branchRegex = re.compile(branch)
+                    if 'imageTags' in image and branchRegex.search(str(image['imageTags'])) is not None: # if image tag exist and image tag match branch
+                        tagged_images.append(image)
+                    if 'imageTags' not in image: # if image not tagged
+                        append_to_list(deletesha, image['imageDigest'])
 
-        print("Total number of images found: {}".format(len(tagged_images) + len(deletesha)))
-        print("Number of untagged images found {}".format(len(deletesha)))
+            print("Total number of images found in branch {}: {}".format(branch,len(tagged_images) + len(deletesha)))
+            print("Number of untagged images found in branch {} {}".format(branch,len(deletesha)))
+            
 
-        tagged_images.sort(key=lambda k: k['imagePushedAt'], reverse=True)
-
-        # Get ImageDigest from ImageURL for running images. Do this for every repository
-        running_sha = []
-        for image in tagged_images:
-            for tag in image['imageTags']:
-                imageurl = repository['repositoryUri'] + ":" + tag
-                for runningimages in running_containers:
-                    if imageurl == runningimages:
-                        if imageurl not in running_sha:
-                            running_sha.append(image['imageDigest'])
-
-        print("Number of running images found {}".format(len(running_sha)))
-        ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
-        for image in tagged_images:
-            if tagged_images.index(image) >= IMAGES_TO_KEEP:
-                for tag in image['imageTags']:
-                    if "latest" not in tag and ignore_tags_regex.search(tag) is None:
-                        if not running_sha or image['imageDigest'] not in running_sha:
+            tagged_images.sort(key=lambda k: k['imagePushedAt'], reverse=True)
+            
+            # dont need to store more than 1 image for develop env
+            keep_count = IMAGES_TO_KEEP
+            if branch == 'develop':
+                print("Overriding develop to 1, deleting others")
+                keep_count = 1
+            ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
+            for image in tagged_images:
+                if tagged_images.index(image) >= keep_count:
+                    for tag in image['imageTags']:
+                        if "latest" not in tag and ignore_tags_regex.search(tag) is None:
                             append_to_list(deletesha, image['imageDigest'])
                             append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
-                                                           "pushedAt": image["imagePushedAt"]})
-        if deletesha:
-            print("Number of images to be deleted: {}".format(len(deletesha)))
-            delete_images(
-                ecr_client,
-                deletesha,
-                deletetag,
-                repository['registryId'],
-                repository['repositoryName']
-            )
-        else:
-            print("Nothing to delete in repository : " + repository['repositoryName'])
+                                                        "pushedAt": image["imagePushedAt"]})
+            if deletesha:
+                print("Number of images to be deleted: {}".format(len(deletesha)))
+                delete_images(
+                    ecr_client,
+                    deletesha,
+                    deletetag,
+                    repository['registryId'],
+                    repository['repositoryName']
+                )
+            else:
+                print("Nothing to delete in repository : " + repository['repositoryName'])
 
 
 def append_to_list(image_digest_list, repo_id):
