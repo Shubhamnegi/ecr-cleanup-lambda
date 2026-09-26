@@ -1,0 +1,8 @@
+[
+  {
+    "cluster_name": "example-production",
+    "region": "us-east-1",
+    "aws_profile": "example-profile",
+    "token_env": "K8S_TOKEN_EXAMPLE_PRODUCTION"
+  }
+]
