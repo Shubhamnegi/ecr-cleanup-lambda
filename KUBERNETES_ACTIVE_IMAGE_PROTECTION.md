@@ -34,7 +34,8 @@ flowchart LR
     C -->|No| D[Skip repository]
     C -->|Yes| E[Calculate stale digest candidates]
     F[Configured Kubernetes clusters] --> G[List non-terminal Pods]
-    G --> H[Extract resolved ECR image references]
+    E --> H[Map Pod image to immutable digest]
+    G --> H
     H --> I[Protected repository/digest set]
     E --> J[Remove protected candidates]
     I --> J
@@ -66,6 +67,7 @@ account:
 ```text
 ecr:DescribeRepositories
 ecr:DescribeImages
+ecr:BatchGetImage
 ecr:BatchDeleteImage
 eks:DescribeCluster
 ```
@@ -284,11 +286,18 @@ approved for redesign. Crucially, move deletion outside the current
 4. Use paginated `list_pod_for_all_namespaces`; retain non-terminal Pods only.
 5. Inspect `container_statuses`, `init_container_statuses`, and
    `ephemeral_container_statuses`.
-6. Pair every status with its spec container by name. Normalize the spec image
-   and resolved `image_id` to an ECR repository URI plus `sha256` digest.
-7. Support known runtime prefixes, including `docker-pullable://` and
-   `containerd://`. If an active ECR image cannot be normalized safely, abort
-   rather than risk deleting it.
+6. Pair every status with its spec container by name. A resolved runtime
+   `image_id` is authoritative and is normalized to an ECR repository URI plus
+   `sha256` digest. Known runtime prefixes, including `docker-pullable://` and
+   `containerd://`, are supported.
+7. When a non-terminal Pod has not yet reported an `image_id`, resolve its spec
+   image tag through ECR, but only for repositories that contain deletion
+   candidates. This keeps `Pending` and `Unknown` Pods protected during image
+   pull and scale-up.
+8. A spec image tag that ECR reports as missing has no current ECR digest to
+   protect and does not abort cleanup. ECR lookup errors, ambiguous responses,
+   malformed runtime IDs, and malformed resolved digests abort safely rather
+   than risk deleting an active image.
 
 ### Phase 4: protection and deletion
 
@@ -296,8 +305,8 @@ approved for redesign. Crucially, move deletion outside the current
 2. Subtract protected values from stale ECR candidates.
 3. In dry-run output, show candidate, protected, skipped, and final-delete
    counts, including cluster/namespace/Pod origin for protected digests.
-4. Immediately before a real delete, fetch the Pod inventory again and repeat
-   the protection calculation.
+4. Immediately before a real delete, fetch the Pod inventory again, repeat
+   the ECR tag mapping, and repeat the protection calculation.
 5. On any recheck failure, exit non-zero without deletion.
 6. Delete only remaining digests and return non-zero on ECR failures.
 
@@ -320,7 +329,7 @@ cluster.
 | EKS setup | Endpoint/CA decoding, missing CA, TLS verification enabled. |
 | Pod selection | `Pending`/`Running`/`Unknown` protect; terminal Pods do not. |
 | Container variants | Normal, init, and ephemeral statuses protect a digest. |
-| Reference parsing | ECR tags/digests, runtime prefixes, non-ECR images, malformed active ECR references fail closed. |
+| Reference mapping | Runtime digests, ECR tag mapping for Pods without a runtime ID, missing tags, runtime prefixes, non-ECR images, and malformed active ECR references. |
 | Multi-cluster protection | Union works; same digest in another repository does not protect the wrong repository. |
 | Fail-closed behavior | Any target/inventory/recheck error makes zero ECR delete calls. |
 | ECR deletion | Dry run deletes nothing; only unprotected values delete; batch size is at most 100; partial failures exit non-zero. |
@@ -343,8 +352,9 @@ Jenkins must run this before dry-run or deletion:
 ## Acceptance criteria
 
 - Non-`-service` repositories make no ECR image-discovery or deletion calls.
-- Every digest reported by a non-terminal Pod in any configured target is
-  excluded from deletion.
+- Every resolved digest reported by a non-terminal Pod in any configured target
+  is excluded from deletion. Pods without a runtime digest are mapped through
+  their ECR tag when that repository has deletion candidates.
 - Any Kubernetes inventory failure makes no `BatchDeleteImage` call.
 - Every actual delete has a fresh Pod inventory recheck.
 - Tokens never appear in logs, command arguments, source control, or target

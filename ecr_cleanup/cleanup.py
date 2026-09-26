@@ -2,10 +2,21 @@
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from ecr_cleanup.ecr import delete_candidates, discover_candidates, iter_eligible_repositories
+from ecr_cleanup.ecr import (
+    CandidateImageResolver,
+    delete_candidates,
+    discover_candidates,
+    iter_eligible_repositories,
+)
 from ecr_cleanup.errors import ConfigurationError
 from ecr_cleanup.kubernetes import KubernetesInventoryCollector
-from ecr_cleanup.models import DeletionReport, ImageCandidate, KubernetesTarget, ProtectedImage
+from ecr_cleanup.models import (
+    DeletionReport,
+    ImageCandidate,
+    KubernetesTarget,
+    ProtectedImage,
+    Repository,
+)
 
 Logger = Callable[[str], None]
 
@@ -59,21 +70,29 @@ class CleanupService:
         """
         target_values = tuple(targets)
         _validate_safety(dry_run, protect_active_pod_images, target_values)
-        protected = self._collect_protected(protect_active_pod_images, target_values)
+        selections = tuple(
+            (
+                repository,
+                discover_candidates(
+                    self._ecr_client, repository, images_to_keep, ignore_tags_regex
+                ),
+            )
+            for repository in iter_eligible_repositories(
+                self._ecr_client, repository_name_contains
+            )
+        )
+        protected = self._collect_protected(
+            protect_active_pod_images, target_values, selections
+        )
         reports = []
 
-        for repository in iter_eligible_repositories(
-            self._ecr_client, repository_name_contains
-        ):
-            candidates = discover_candidates(
-                self._ecr_client, repository, images_to_keep, ignore_tags_regex
-            )
+        for repository, candidates in selections:
             deletable = _exclude_protected(candidates, protected)
             protected_count = len(candidates) - len(deletable)
             self._log_selection(repository.uri, candidates, protected, deletable, dry_run)
 
             if not dry_run and deletable:
-                refreshed = self._inventory_collector.collect(target_values)
+                refreshed = self._collect_protected(True, target_values, selections)
                 deletable = _exclude_protected(candidates, refreshed)
                 protected_count = len(candidates) - len(deletable)
                 deleted = delete_candidates(self._ecr_client, deletable)
@@ -95,12 +114,17 @@ class CleanupService:
         self,
         enabled: bool,
         targets: tuple[KubernetesTarget, ...],
+        selections: tuple[tuple[Repository, tuple[ImageCandidate, ...]], ...],
     ) -> tuple[ProtectedImage, ...]:
         """Collect active images only when the caller enabled protection."""
         if not enabled:
             self._logger("WARNING: active Pod image protection is disabled")
             return ()
-        protected = self._inventory_collector.collect(targets)
+        resolver = CandidateImageResolver(
+            self._ecr_client,
+            (candidate for _, candidates in selections for candidate in candidates),
+        )
+        protected = self._inventory_collector.collect(targets, resolver.resolve)
         self._logger("Protected active Kubernetes image digests: {}".format(len(protected)))
         return protected
 

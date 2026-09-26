@@ -15,9 +15,11 @@ class FakeInventory:
     def __init__(self, responses):
         self.responses = iter(responses)
         self.calls = []
+        self.resolvers = []
 
-    def collect(self, targets):
+    def collect(self, targets, image_reference_resolver=None):
         self.calls.append(tuple(targets))
+        self.resolvers.append(image_reference_resolver)
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
@@ -62,6 +64,7 @@ def test_dry_run_excludes_protected_digest_without_delete():
     assert reports[0].deleted == 0
     assert client.delete_calls == []
     assert len(inventory.calls) == 1
+    assert callable(inventory.resolvers[0])
     assert any("Protected" in log for log in logs)
     assert not any("Would delete" in log for log in logs)
 

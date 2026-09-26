@@ -23,6 +23,7 @@ _STATUS_GROUPS = (
 
 EksClientFactory = Callable[[KubernetesTarget], Any]
 CoreApiFactory = Callable[[str, str, str], Any]
+ImageReferenceResolver = Callable[[str, str], Optional[str]]
 
 
 class KubernetesInventoryCollector:
@@ -48,11 +49,17 @@ class KubernetesInventoryCollector:
         self._core_api_factory = core_api_factory or _default_core_api
         self._environment = environment
 
-    def collect(self, targets: Iterable[KubernetesTarget]) -> tuple[ProtectedImage, ...]:
+    def collect(
+        self,
+        targets: Iterable[KubernetesTarget],
+        image_reference_resolver: Optional[ImageReferenceResolver] = None,
+    ) -> tuple[ProtectedImage, ...]:
         """Collect active ECR images from every configured target.
 
         Args:
             targets: Kubernetes targets to inventory.
+            image_reference_resolver: Resolves a tagged ECR spec image when a
+                container has not yet reported an immutable runtime image ID.
 
         Returns:
             Unique protected images with their Pod origin.
@@ -62,7 +69,7 @@ class KubernetesInventoryCollector:
         """
         protected = set()
         for target in targets:
-            protected.update(self._collect_target(target))
+            protected.update(self._collect_target(target, image_reference_resolver))
         return tuple(
             sorted(
                 protected,
@@ -76,7 +83,11 @@ class KubernetesInventoryCollector:
             )
         )
 
-    def _collect_target(self, target: KubernetesTarget) -> tuple[ProtectedImage, ...]:
+    def _collect_target(
+        self,
+        target: KubernetesTarget,
+        image_reference_resolver: Optional[ImageReferenceResolver],
+    ) -> tuple[ProtectedImage, ...]:
         """Collect protected images for one target."""
         try:
             token = get_target_token(target, self._environment)
@@ -88,7 +99,9 @@ class KubernetesInventoryCollector:
                 return tuple(
                     image
                     for pod in _iter_active_pods(core_api)
-                    for image in _protected_images_from_pod(pod, target.cluster_name)
+                    for image in _protected_images_from_pod(
+                        pod, target.cluster_name, image_reference_resolver
+                    )
                 )
             finally:
                 close = getattr(core_api, "close", None)
@@ -199,11 +212,16 @@ def _iter_active_pods(core_api: Any) -> Iterator[dict[str, Any]]:
             return
 
 
-def _protected_images_from_pod(pod: dict[str, Any], cluster_name: str) -> tuple[ProtectedImage, ...]:
+def _protected_images_from_pod(
+    pod: dict[str, Any],
+    cluster_name: str,
+    image_reference_resolver: Optional[ImageReferenceResolver] = None,
+) -> tuple[ProtectedImage, ...]:
     """Extract all active ECR images from one Pod.
 
-    An unresolved ECR image in a non-terminal Pod blocks cleanup. This is safer
-    than treating a Pod that has not yet populated ``image_id`` as disposable.
+    Runtime image IDs are authoritative. Pods that have not yet populated one
+    are mapped through their ECR tag so Pending and Unknown Pods remain in the
+    active-image protection set.
     """
     namespace = _nested(pod, "metadata", "namespace") or "default"
     pod_name = _nested(pod, "metadata", "name") or "<unknown>"
@@ -224,11 +242,12 @@ def _protected_images_from_pod(pod: dict[str, Any], cluster_name: str) -> tuple[
         }
         for name, spec_image in spec_by_name.items():
             if _is_private_ecr_image(spec_image) and name not in status_by_name:
-                raise ProtectionInventoryError(
-                    "Active Pod {}/{} has unresolved ECR image '{}'".format(
-                        namespace, pod_name, spec_image
+                resolved = _resolve_spec_image(spec_image, image_reference_resolver)
+                if resolved is not None:
+                    repository_uri, digest = resolved
+                    images.append(
+                        ProtectedImage(repository_uri, digest, cluster_name, namespace, pod_name)
                     )
-                )
         for container_status in status.get(status_key, []) or []:
             name = container_status.get("name")
             spec_image = spec_by_name.get(name, "")
@@ -236,12 +255,12 @@ def _protected_images_from_pod(pod: dict[str, Any], cluster_name: str) -> tuple[
                 continue
             image_id = container_status.get("image_id") or container_status.get("imageID")
             if not image_id:
-                raise ProtectionInventoryError(
-                    "Active Pod {}/{} has unresolved ECR image '{}'".format(
-                        namespace, pod_name, spec_image
-                    )
-                )
-            repository_uri, digest = _normalize_ecr_reference(spec_image, image_id)
+                resolved = _resolve_spec_image(spec_image, image_reference_resolver)
+                if resolved is None:
+                    continue
+                repository_uri, digest = resolved
+            else:
+                repository_uri, digest = _normalize_ecr_reference(spec_image, image_id)
             images.append(
                 ProtectedImage(
                     repository_uri=repository_uri,
@@ -252,6 +271,29 @@ def _protected_images_from_pod(pod: dict[str, Any], cluster_name: str) -> tuple[
                 )
             )
     return tuple(images)
+
+
+def _resolve_spec_image(
+    spec_image: str,
+    image_reference_resolver: Optional[ImageReferenceResolver],
+) -> tuple[str, str] | None:
+    """Resolve a tagged ECR spec image when Kubernetes has no runtime digest."""
+    repository_uri = _strip_tag_or_digest(spec_image)
+    digest_match = _DIGEST_PATTERN.search(spec_image)
+    if digest_match:
+        return repository_uri, digest_match.group(1).lower()
+    if image_reference_resolver is None:
+        raise ProtectionInventoryError(
+            "Active ECR image '{}' needs an ECR tag resolver".format(spec_image)
+        )
+    digest = image_reference_resolver(repository_uri, _image_tag(spec_image))
+    if digest is None:
+        return None
+    if not _DIGEST_PATTERN.fullmatch(digest):
+        raise ProtectionInventoryError(
+            "ECR resolver returned an invalid digest for active image '{}'".format(spec_image)
+        )
+    return repository_uri, digest.lower()
 
 
 def _normalize_ecr_reference(spec_image: str, image_id: str) -> tuple[str, str]:
@@ -279,6 +321,16 @@ def _strip_tag_or_digest(image: str) -> str:
     if colon_index > slash_index:
         return without_digest[:colon_index]
     return without_digest
+
+
+def _image_tag(image: str) -> str:
+    """Return a tagged image's requested tag, defaulting to Docker's latest."""
+    without_digest = image.split("@", 1)[0]
+    slash_index = without_digest.rfind("/")
+    colon_index = without_digest.rfind(":")
+    if colon_index > slash_index:
+        return without_digest[colon_index + 1:]
+    return "latest"
 
 
 def _is_private_ecr_image(image: str) -> bool:
