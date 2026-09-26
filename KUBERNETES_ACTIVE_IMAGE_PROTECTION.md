@@ -99,19 +99,15 @@ Jenkins egress range where practical.
 ### 2. Deploy a read-only ServiceAccount
 
 Apply [`kubernetes/ecr-cleanup-reader.yaml`](kubernetes/ecr-cleanup-reader.yaml)
-in every target cluster. Its contents are:
+in every target cluster. It uses the existing `default` namespace and does not
+create a namespace. Its contents are:
 
 ```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ecr-cleanup
----
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ecr-cleanup-reader
-  namespace: ecr-cleanup
+  namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -129,7 +125,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: ecr-cleanup-reader
-    namespace: ecr-cleanup
+    namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -144,7 +140,7 @@ or cluster-admin privileges.
 For a manual test, an administrator can issue a short-lived token:
 
 ```bash
-kubectl -n ecr-cleanup create token ecr-cleanup-reader --duration=1h
+kubectl -n default create token ecr-cleanup-reader --duration=1h
 ```
 
 Store the result as Jenkins **Secret Text** and bind it as a masked variable,
@@ -152,8 +148,30 @@ such as `K8S_TOKEN_EXAMPLE_PRODUCTION`. Do not echo it or enable shell tracing
 with `set -x`.
 
 For scheduled jobs, automate token rotation through an approved credential
-management process. Long-lived ServiceAccount token Secrets are an interim
-option only; they need documented rotation and immediate revocation procedures.
+management process. If a static Jenkins credential is required, apply the
+optional [`kubernetes/ecr-cleanup-reader-token.example.yaml`](kubernetes/ecr-cleanup-reader-token.example.yaml).
+It creates the `default/ecr-cleanup-reader-token` Secret, a long-lived
+`kubernetes.io/service-account-token` credential. Retrieve its raw (decoded)
+`token` data field only for entry into a masked Jenkins Secret Text credential:
+
+```bash
+kubectl -n default get secret ecr-cleanup-reader-token \
+  -o jsonpath='{.data.token}' | base64 --decode
+```
+
+Do not log or commit that value. This long-lived option requires documented
+rotation and immediate revocation procedures. Delete the Secret to revoke it.
+
+Verify that the binding subject is the intended ServiceAccount before using the
+token:
+
+```bash
+kubectl get clusterrolebinding ecr-cleanup-pod-reader \
+  -o jsonpath='{.subjects[0].namespace}{"/"}{.subjects[0].name}{"\\n"}'
+kubectl auth can-i list pods \
+  --as=system:serviceaccount:default:ecr-cleanup-reader \
+  --all-namespaces
+```
 
 ### 4. Validate TLS, token, and RBAC
 
