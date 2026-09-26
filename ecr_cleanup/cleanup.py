@@ -134,6 +134,15 @@ class CleanupService:
                         image.pod_name,
                     )
                 )
+        for candidate in deletable:
+            action = "Would delete" if dry_run else "Eligible for deletion"
+            self._logger(
+                "{} {}@{}".format(
+                    action,
+                    candidate.repository.uri,
+                    candidate.digest,
+                )
+            )
 
 
 def _validate_safety(

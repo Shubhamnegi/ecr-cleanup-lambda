@@ -63,6 +63,7 @@ def test_dry_run_excludes_protected_digest_without_delete():
     assert client.delete_calls == []
     assert len(inventory.calls) == 1
     assert any("Protected" in log for log in logs)
+    assert not any("Would delete" in log for log in logs)
 
 
 def test_real_delete_rechecks_and_deletes_only_unprotected_digest():
@@ -164,3 +165,4 @@ def test_dry_run_can_expose_legacy_selection_with_explicit_warning():
     assert reports[0].deletable == 1
     assert client.delete_calls == []
     assert "disabled" in logs[0]
+    assert any("Would delete {}@{}".format(REPOSITORY.uri, DIGEST_B) == log for log in logs)
