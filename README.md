@@ -1,65 +1,56 @@
 # Automated Image Cleanup for Amazon ECR
-The Python script and Lambda function described here help clean up images in [Amazon ECR](https://aws.amazon.com/ecr). The script looks for images that are not used in running [Amazon ECS](https://aws.amazon.com/ecs) tasks that can be deleted. You can configure the script to print the image list first to confirm deletions, specify a region, or specify a number of images to keep for potential rollbacks.
+This repository contains a Python script for cleaning up stale images in
+[Amazon ECR](https://aws.amazon.com/ecr). It can be run from the command line
+or a Jenkins job, with a dry-run mode, regional selection, and configurable
+retention count. A legacy SAM/Lambda template also remains in the repository.
+
+> **Safety note:** non-dry-run cleanup requires Kubernetes active-image
+> protection and a target configuration file. The Jenkins/Kubernetes active-
+> image protection design, cluster setup, multi-cluster configuration, and
+> test/coverage gate are documented in
+> [Kubernetes active-image protection guide](KUBERNETES_ACTIVE_IMAGE_PROTECTION.md).
+> The deployable RBAC manifest is
+> [`kubernetes/ecr-cleanup-reader.yaml`](kubernetes/ecr-cleanup-reader.yaml),
+> and [`k8s-targets.example.json`](k8s-targets.example.json) is a token-free
+> target configuration example.
 
 ## Authenticate with AWS
 [Configuring the AWS Command Line Interface.](http://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html)
 
-## Use virtualenv for Python execution
+## Jenkins/Python setup
 
-To prevent any problems with your system Python version conflicting with the application, we recommend using virtualenv.
+Use a Python 3 virtual environment and install the runtime and test
+dependencies:
 
-Install Python:
-    `pip install python 3`
+```bash
+python3 -m venv venv
+./venv/bin/pip install -r requirements-dev.txt
+./venv/bin/python -m pytest
+```
 
-Install virtualenv:
+The legacy SAM/Lambda template is retained for reference; the supported
+operational workflow is the Jenkins command-line job.
 
-    $ pip install virtualenv
-    $ virtualenv -p PATH_TO_YOUR_PYTHON_3 cloudformtion
-    $ virtualenv ~/.virtualenvs/cloudformtion
-    $ source ~/.virtualenvs/cloudformtion/bin/activate
-    
-## Generate the Lambda package
+## Running cleanup
 
-1. CD to the folder that contains main.py.
-1. Run the following command:
-`pip install -r requirements.txt -t `pwd``
-1. Compress the contents of folder (not the folder).
-    
-## Upload the package to Lambda
+Start with a dry run. Only repositories containing `-service` are eligible:
 
-1. Run the following command:
-`aws lambda create-function --function-name {NAME_OF_FUNCTION} --runtime python2.7 
---role {ARN_NUMBER} --handler main.handler --timeout 15 
---zip-file fileb://{ZIP_FILE_PATH}`
-    
-## Send the package update to Lambda
+```bash
+./venv/bin/python main.py -dryrun true -imagestokeep 5 -region YOUR_ECR_REGION
+```
 
-1. Run the following command:
-    
-    `aws lambda update-function-code --function-name {NAME_OF_FUNCTION} --zip-file fileb://{ZIP_FILE_PATH}`
+For real deletion, bind a masked ServiceAccount token in Jenkins, configure
+every relevant Kubernetes cluster in a target JSON file, and enable active
+image protection:
 
+```bash
+./venv/bin/python main.py \
+  -dryrun false \
+  -imagestokeep 5 \
+  -region YOUR_ECR_REGION \
+  --k8s-targets-file k8s-targets.json \
+  --protect-active-pod-images
+```
 
-## Examples
-Prints the images that are not used by running tasks and which are older than the last 100 versions, in all regions:
-
-`python main.py`
-
-
-Deletes the images that are not used by running tasks and which are older than the last 100 versions, in all regions:
-
-`python main.py –dryrun False`
-
-
-Deletes the images that are not used by running tasks and which are older than the last 20 versions (in each repository), in all regions:
-
-`python main.py –dryrun False –imagestokeep 20`
-
-
-Deletes the images that are not used by running tasks and which are older than the last 20 versions (in each repository), in Oregon only:
-
-`python main.py –dryrun False –imagestokeep 20 –region us-west-2`
-
-Deletes the images that are not used by running tasks and which are older than the last 20 versions (in each repository), in Oregon only, and ignore image tags that contains `release` or `archive`:
-
-`python main.py –dryrun False –imagestokeep 20 –region us-west-2 -ignoretagsregex release|archive`
-
+The command exits without deletion if Kubernetes inventory, token validation,
+or TLS verification fails.
