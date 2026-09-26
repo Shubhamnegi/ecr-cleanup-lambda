@@ -1,0 +1,10 @@
+# Optional: creates a long-lived ServiceAccount token for a Jenkins credential.
+# Apply only if your organization has approved a rotation and revocation process.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ecr-cleanup-reader-token
+  namespace: default
+  annotations:
+    kubernetes.io/service-account.name: ecr-cleanup-reader
+type: kubernetes.io/service-account-token

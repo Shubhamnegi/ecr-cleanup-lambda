@@ -12,7 +12,10 @@ retention count. A legacy SAM/Lambda template also remains in the repository.
 > The deployable RBAC manifest is
 > [`kubernetes/ecr-cleanup-reader.yaml`](kubernetes/ecr-cleanup-reader.yaml),
 > and [`k8s-targets.example.json`](k8s-targets.example.json) is a token-free
-> target configuration example.
+> target configuration example. The manifest uses the existing `default`
+> namespace. An optional, long-lived token Secret template is available at
+> [`kubernetes/ecr-cleanup-reader-token.example.yaml`](kubernetes/ecr-cleanup-reader-token.example.yaml);
+> use it only with a credential rotation process.
 
 ## Authenticate with AWS
 [Configuring the AWS Command Line Interface.](http://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html)
