@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ecr_cleanup.ecr import delete_candidates, discover_candidates, iter_eligible_repositories
-from ecr_cleanup.errors import DeletionError
+from ecr_cleanup.ecr import CandidateImageResolver, delete_candidates, discover_candidates, iter_eligible_repositories
+from ecr_cleanup.errors import DeletionError, ProtectionInventoryError
 from ecr_cleanup.models import ImageCandidate
 from tests.conftest import DIGEST_A, DIGEST_B, FakeEcrClient, REPOSITORY, image, repository
 
@@ -95,3 +95,60 @@ def test_delete_candidates_surfaces_ecr_failures():
     client = FakeEcrClient([], [], failures=[{"failureCode": "ImageNotFound"}])
     with pytest.raises(DeletionError, match="rejected"):
         delete_candidates(client, (ImageCandidate(REPOSITORY, DIGEST_A),))
+
+
+def test_candidate_image_resolver_maps_only_candidate_repositories():
+    """Pending Pod tags resolve only when their repository can be deleted."""
+    client = FakeEcrClient(
+        [], [], image_lookup={"images": [{"imageId": {"imageDigest": DIGEST_A}}]}
+    )
+    resolver = CandidateImageResolver(client, (ImageCandidate(REPOSITORY, DIGEST_B),))
+
+    assert resolver.resolve(REPOSITORY.uri, "master-old") == DIGEST_A
+    assert client.get_image_calls == [{
+        "registryId": REPOSITORY.registry_id,
+        "repositoryName": REPOSITORY.name,
+        "imageIds": [{"imageTag": "master-old"}],
+    }]
+    assert resolver.resolve(REPOSITORY.uri, "master-old") == DIGEST_A
+    assert len(client.get_image_calls) == 1
+    assert resolver.resolve(REPOSITORY.uri + "-other", "master-old") is None
+
+
+def test_candidate_image_resolver_ignores_missing_tags_and_fails_for_ecr_errors():
+    """A deleted Pod tag is harmless, but lookup ambiguity blocks cleanup."""
+    missing = FakeEcrClient(
+        [], [], image_lookup={"images": [], "failures": [{"failureCode": "ImageNotFound"}]}
+    )
+    resolver = CandidateImageResolver(missing, (ImageCandidate(REPOSITORY, DIGEST_B),))
+    assert resolver.resolve(REPOSITORY.uri, "removed") is None
+
+    broken = FakeEcrClient([], [], image_lookup={"images": []})
+    resolver = CandidateImageResolver(broken, (ImageCandidate(REPOSITORY, DIGEST_B),))
+    with pytest.raises(ProtectionInventoryError, match="unambiguous"):
+        resolver.resolve(REPOSITORY.uri, "master-old")
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        ({"images": [], "failures": [{"failureCode": "AccessDenied"}]}, "AccessDenied"),
+        ({"images": [{"imageId": {"imageDigest": "not-a-digest"}}]}, "invalid digest"),
+    ],
+)
+def test_candidate_image_resolver_fails_closed_for_invalid_ecr_responses(response, message):
+    """Only an ECR digest or an explicit missing tag may continue cleanup."""
+    client = FakeEcrClient([], [], image_lookup=response)
+    resolver = CandidateImageResolver(client, (ImageCandidate(REPOSITORY, DIGEST_B),))
+
+    with pytest.raises(ProtectionInventoryError, match=message):
+        resolver.resolve(REPOSITORY.uri, "master-old")
+
+
+def test_candidate_image_resolver_fails_closed_for_ecr_client_errors():
+    """Transport errors do not make active-image protection optional."""
+    client = FakeEcrClient([], [], image_lookup=RuntimeError("network unavailable"))
+    resolver = CandidateImageResolver(client, (ImageCandidate(REPOSITORY, DIGEST_B),))
+
+    with pytest.raises(ProtectionInventoryError, match="network unavailable"):
+        resolver.resolve(REPOSITORY.uri, "master-old")

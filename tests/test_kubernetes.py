@@ -134,8 +134,8 @@ def test_collector_fails_closed_for_unresolved_active_ecr_images(image_id):
         collector.collect((target,))
 
 
-def test_collector_fails_closed_when_active_ecr_container_has_no_status():
-    """An ECR image awaiting resolution is not treated as safe to delete."""
+def test_collector_maps_pending_ecr_image_without_container_status():
+    """A Pending Pod tag is mapped when Kubernetes has no runtime image ID."""
     target = KubernetesTarget("prod", "r", "TOKEN")
     core = FakeCoreApi([{"items": [pod(
         "starting",
@@ -146,8 +146,64 @@ def test_collector_fails_closed_when_active_ecr_container_has_no_status():
     eks.describe_cluster.return_value = _cluster_response()
     collector = KubernetesInventoryCollector(lambda _: eks, lambda *_: core, {"TOKEN": "secret"})
 
-    with pytest.raises(ProtectionInventoryError, match="unresolved"):
-        collector.collect((target,))
+    resolver_calls = []
+
+    def resolve(repository_uri, image_tag):
+        resolver_calls.append((repository_uri, image_tag))
+        return DIGEST_A
+
+    protected = collector.collect((target,), resolve)
+
+    assert {(image.repository_uri, image.digest) for image in protected} == {(REPO, DIGEST_A)}
+    assert resolver_calls == [(REPO, "v1")]
+
+
+def test_collector_ignores_missing_pending_tag_and_fails_without_resolver():
+    """A removed tag is harmless, but absent mapping support remains unsafe."""
+    target = KubernetesTarget("prod", "r", "TOKEN")
+    active = pod(
+        "starting",
+        phase="Pending",
+        containers=[{"name": "app", "image": REPO + ":removed"}],
+    )
+    eks = Mock()
+    eks.describe_cluster.return_value = _cluster_response()
+    missing = KubernetesInventoryCollector(
+        lambda _: eks,
+        lambda *_: FakeCoreApi([{"items": [active], "metadata": {}}]),
+        {"TOKEN": "secret"},
+    )
+    assert missing.collect((target,), lambda *_: None) == ()
+
+    without_mapping = KubernetesInventoryCollector(
+        lambda _: eks,
+        lambda *_: FakeCoreApi([{"items": [active], "metadata": {}}]),
+        {"TOKEN": "secret"},
+    )
+    with pytest.raises(ProtectionInventoryError, match="tag resolver"):
+        without_mapping.collect((target,))
+
+
+def test_collector_maps_empty_status_image_id_and_digest_spec_images():
+    """Both empty status IDs and digest-pinned specs retain their digest."""
+    target = KubernetesTarget("prod", "r", "TOKEN")
+    active = pod(
+        "starting",
+        phase="Pending",
+        containers=[
+            {"name": "tagged", "image": REPO + ":v1"},
+            {"name": "pinned", "image": REPO + "@" + DIGEST_B},
+        ],
+        statuses=[{"name": "tagged", "image_id": ""}],
+    )
+    core = FakeCoreApi([{"items": [active], "metadata": {}}])
+    eks = Mock()
+    eks.describe_cluster.return_value = _cluster_response()
+    collector = KubernetesInventoryCollector(lambda _: eks, lambda *_: core, {"TOKEN": "secret"})
+
+    protected = collector.collect((target,), lambda *_: DIGEST_A)
+
+    assert {image.digest for image in protected} == {DIGEST_A, DIGEST_B}
 
 
 def test_collector_ignores_non_ecr_images_and_fails_for_missing_token():
