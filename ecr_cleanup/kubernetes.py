@@ -276,7 +276,7 @@ def _protected_images_from_pod(
 def _resolve_spec_image(
     spec_image: str,
     image_reference_resolver: Optional[ImageReferenceResolver],
-) -> tuple[str, str] | None:
+) -> Optional[tuple[str, str]]:
     """Resolve a tagged ECR spec image when Kubernetes has no runtime digest."""
     repository_uri = _strip_tag_or_digest(spec_image)
     digest_match = _DIGEST_PATTERN.search(spec_image)
