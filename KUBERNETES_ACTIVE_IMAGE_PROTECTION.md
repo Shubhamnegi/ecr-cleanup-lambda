@@ -308,7 +308,9 @@ approved for redesign. Crucially, move deletion outside the current
 4. Immediately before a real delete, fetch the Pod inventory again, repeat
    the ECR tag mapping, and repeat the protection calculation.
 5. On any recheck failure, exit non-zero without deletion.
-6. Delete only remaining digests and return non-zero on ECR failures.
+6. Delete only remaining digests. Log and skip ECR's
+   `ImageReferencedByManifestList` failures because the digest is still owned
+   by a manifest list; return non-zero for every other ECR failure.
 
 ## Required tests and coverage gate
 
@@ -332,7 +334,7 @@ cluster.
 | Reference mapping | Runtime digests, ECR tag mapping for Pods without a runtime ID, missing tags, runtime prefixes, non-ECR images, and malformed active ECR references. |
 | Multi-cluster protection | Union works; same digest in another repository does not protect the wrong repository. |
 | Fail-closed behavior | Any target/inventory/recheck error makes zero ECR delete calls. |
-| ECR deletion | Dry run deletes nothing; only unprotected values delete; batch size is at most 100; partial failures exit non-zero. |
+| ECR deletion | Dry run deletes nothing; only unprotected values delete; batch size is at most 100; manifest-list child failures are logged/skipped; other partial failures exit non-zero. |
 | Regression | Branch retention, `latest`, ignore regex, untagged images, and keep count behavior. |
 
 Add a strict coverage configuration:

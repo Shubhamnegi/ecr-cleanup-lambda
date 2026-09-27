@@ -1,6 +1,6 @@
 """ECR discovery, retention selection, and deletion adapters."""
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from typing import Any, Optional
 
@@ -9,6 +9,8 @@ from ecr_cleanup.models import ImageCandidate, Repository, TaggedImage
 
 BRANCHES = ("master", "develop")
 MAX_DELETE_BATCH_SIZE = 100
+_MANIFEST_LIST_REFERENCE_FAILURE = "ImageReferencedByManifestList"
+DeletionLogger = Callable[[str], None]
 
 
 class CandidateImageResolver:
@@ -161,12 +163,17 @@ def discover_candidates(
     )
 
 
-def delete_candidates(ecr_client: Any, candidates: Iterable[ImageCandidate]) -> int:
+def delete_candidates(
+    ecr_client: Any,
+    candidates: Iterable[ImageCandidate],
+    logger: DeletionLogger = print,
+) -> int:
     """Delete candidate digests in ECR's maximum supported batch size.
 
     Args:
         ecr_client: Boto3-compatible ECR client.
         candidates: Candidates for one ECR repository.
+        logger: Receives manifest-list skips without exposing credentials.
 
     Returns:
         Count of ECR digests submitted for deletion.
@@ -189,11 +196,36 @@ def delete_candidates(ecr_client: Any, candidates: Iterable[ImageCandidate]) -> 
             repositoryName=repository.name,
             imageIds=[{"imageDigest": candidate.digest} for candidate in batch],
         )
-        failures = response.get("failures", [])
-        if failures:
-            raise DeletionError("ECR rejected image deletion: {}".format(failures))
-        deleted += len(batch)
+        failures = tuple(response.get("failures", []))
+        skippable_failures, fatal_failures = _partition_delete_failures(failures)
+        for failure in skippable_failures:
+            digest = failure.get("imageId", {}).get("imageDigest", "<unknown>")
+            logger(
+                "Skipped {}@{}: image is referenced by an ECR manifest list".format(
+                    repository.uri, digest
+                )
+            )
+        if fatal_failures:
+            raise DeletionError("ECR rejected image deletion: {}".format(fatal_failures))
+        deleted += len(batch) - len(skippable_failures)
     return deleted
+
+
+def _partition_delete_failures(
+    failures: tuple[dict[str, Any], ...],
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    """Separate known non-destructive manifest-list failures from fatal ones."""
+    skippable = tuple(
+        failure
+        for failure in failures
+        if failure.get("failureCode") == _MANIFEST_LIST_REFERENCE_FAILURE
+    )
+    fatal = tuple(
+        failure
+        for failure in failures
+        if failure.get("failureCode") != _MANIFEST_LIST_REFERENCE_FAILURE
+    )
+    return skippable, fatal
 
 
 def _iter_image_details(ecr_client: Any, repository: Repository) -> Iterator[dict[str, Any]]:

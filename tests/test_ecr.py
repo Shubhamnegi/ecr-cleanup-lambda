@@ -97,6 +97,37 @@ def test_delete_candidates_surfaces_ecr_failures():
         delete_candidates(client, (ImageCandidate(REPOSITORY, DIGEST_A),))
 
 
+def test_delete_candidates_skips_manifest_list_children_and_continues():
+    """Manifest-list children are logged skips and do not stop later batches."""
+    candidates = tuple(
+        ImageCandidate(REPOSITORY, "sha256:{:064x}".format(index))
+        for index in range(101)
+    )
+    skipped_digest = candidates[0].digest
+    client = FakeEcrClient(
+        [],
+        [],
+        delete_failures_by_call=[
+            [{
+                "imageId": {"imageDigest": skipped_digest},
+                "failureCode": "ImageReferencedByManifestList",
+            }],
+            [],
+        ],
+    )
+    logs = []
+
+    deleted = delete_candidates(client, candidates, logs.append)
+
+    assert deleted == 100
+    assert [len(call["imageIds"]) for call in client.delete_calls] == [100, 1]
+    assert logs == [
+        "Skipped {}@{}: image is referenced by an ECR manifest list".format(
+            REPOSITORY.uri, skipped_digest
+        )
+    ]
+
+
 def test_candidate_image_resolver_maps_only_candidate_repositories():
     """Pending Pod tags resolve only when their repository can be deleted."""
     client = FakeEcrClient(

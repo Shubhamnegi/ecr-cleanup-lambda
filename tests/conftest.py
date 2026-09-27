@@ -27,12 +27,20 @@ class FakePaginator:
 class FakeEcrClient:
     """Small in-memory ECR client for discovery and deletion tests."""
 
-    def __init__(self, repository_pages, image_pages, failures=None, image_lookup=None):
+    def __init__(
+        self,
+        repository_pages,
+        image_pages,
+        failures=None,
+        image_lookup=None,
+        delete_failures_by_call=None,
+    ):
         self.repository_paginator = FakePaginator(repository_pages)
         self.image_paginator = FakePaginator(image_pages)
         self.delete_calls = []
         self.get_image_calls = []
         self.failures = failures or []
+        self.delete_failures_by_call = delete_failures_by_call
         self.image_lookup = image_lookup or {"images": []}
 
     def get_paginator(self, name):
@@ -43,6 +51,8 @@ class FakeEcrClient:
 
     def batch_delete_image(self, **kwargs):
         self.delete_calls.append(kwargs)
+        if self.delete_failures_by_call is not None:
+            return {"failures": self.delete_failures_by_call[len(self.delete_calls) - 1]}
         return {"failures": self.failures}
 
     def batch_get_image(self, **kwargs):
