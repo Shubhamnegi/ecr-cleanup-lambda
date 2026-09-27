@@ -38,6 +38,19 @@ def _client_with_old_master():
     )
 
 
+def _client_with_two_old_master_repositories(delete_failures_by_call):
+    """Create two eligible repositories with one stale digest each."""
+    now = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    return FakeEcrClient(
+        [{"repositories": [repository(), repository("payments-service")]}],
+        [{"imageDetails": [
+            image(DIGEST_A, ["master-new"], now),
+            image(DIGEST_B, ["master-old"], now - timedelta(days=1)),
+        ]}],
+        delete_failures_by_call=delete_failures_by_call,
+    )
+
+
 def _protected(digest=DIGEST_B):
     """Create a protected image in the repository under test."""
     return ProtectedImage(REPOSITORY.uri, digest, "prod", "default", "orders")
@@ -107,6 +120,33 @@ def test_final_recheck_can_protect_previously_deletable_digest():
     assert reports[0].protected == 1
     assert reports[0].deleted == 0
     assert client.delete_calls == []
+
+
+def test_manifest_list_skip_does_not_stop_later_repositories():
+    """A manifest-list child skip is logged while cleanup advances to the next repo."""
+    client = _client_with_two_old_master_repositories([
+        [{
+            "imageId": {"imageDigest": DIGEST_B},
+            "failureCode": "ImageReferencedByManifestList",
+        }],
+        [],
+    ])
+    inventory = FakeInventory([(), (), ()])
+    logs = []
+    service = CleanupService(client, inventory, logs.append)
+
+    reports = service.run(
+        repository_name_contains="-service",
+        images_to_keep=1,
+        ignore_tags_regex="^$",
+        dry_run=False,
+        protect_active_pod_images=True,
+        targets=(KubernetesTarget("prod", "r", "TOKEN"),),
+    )
+
+    assert [report.deleted for report in reports] == [0, 1]
+    assert len(client.delete_calls) == 2
+    assert any("referenced by an ECR manifest list" in log for log in logs)
 
 
 @pytest.mark.parametrize(

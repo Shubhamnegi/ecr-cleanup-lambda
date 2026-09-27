@@ -95,7 +95,7 @@ class CleanupService:
                 refreshed = self._collect_protected(True, target_values, selections)
                 deletable = _exclude_protected(candidates, refreshed)
                 protected_count = len(candidates) - len(deletable)
-                deleted = delete_candidates(self._ecr_client, deletable)
+                deleted = delete_candidates(self._ecr_client, deletable, self._logger)
             else:
                 deleted = 0
 
