@@ -22,7 +22,7 @@ retention count. A legacy SAM/Lambda template also remains in the repository.
 
 ## Jenkins/Python setup
 
-Use a Python 3 virtual environment and install the runtime and test
+Use Python 3.9 or newer in a virtual environment and install the runtime and test
 dependencies:
 
 ```bash
