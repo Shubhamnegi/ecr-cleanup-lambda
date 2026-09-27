@@ -2,7 +2,7 @@
 import re
 from collections.abc import Iterable, Iterator
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from ecr_cleanup.errors import DeletionError, ProtectionInventoryError
 from ecr_cleanup.models import ImageCandidate, Repository, TaggedImage
@@ -24,9 +24,9 @@ class CandidateImageResolver:
         self._repositories = {
             candidate.repository.uri: candidate.repository for candidate in candidates
         }
-        self._resolved_tags: dict[tuple[str, str], str | None] = {}
+        self._resolved_tags: dict[tuple[str, str], Optional[str]] = {}
 
-    def resolve(self, repository_uri: str, image_tag: str) -> str | None:
+    def resolve(self, repository_uri: str, image_tag: str) -> Optional[str]:
         """Resolve a tag to its ECR digest when that repository has candidates.
 
         A missing tag is not an ECR deletion risk and returns ``None``. Other
